@@ -7,6 +7,7 @@ import json, subprocess
 BASE = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
 REG_FILE = os.path.join(BASE, "companies.json")
 ARGS = sys.argv[1:]
+VERSION = "2026.10.10.3"                               # bigger = newer; "Update Program" installs a downloaded file only if its VERSION is bigger
 LEGACY_DB = "combo_data_v3.db"                         # the data file of the first company (kept as it is)
 
 def load_registry():
@@ -2208,6 +2209,84 @@ if __name__ == "__main__":
         e.bind("<Return>", pick); lb.bind("<Return>", pick); lb.bind("<Double-1>", pick); e.bind("<Down>", lambda ev: (lb.focus_set(), "break")[1])
         win.bind("<Escape>", lambda ev: win.destroy())
     def show_help(): messagebox.showinfo("Shortcut keys", "\n".join(f"{k:<16}{d}" if k else d for k, d in SHORTCUTS))
+    def update_program(online_path=None, online_ver=None):
+        """Install a newly downloaded combo_manager.py over this one (old copy is kept in 'old_versions'), then restart. Data is never touched."""
+        import glob, shutil, py_compile
+        me = os.path.abspath(__file__) if not getattr(sys, "frozen", False) else None
+        if not me or not me.lower().endswith(".py"): messagebox.showinfo("Update", "Update works only when running combo_manager.py directly."); return
+        def ver(p):
+            try: m = re.search(r'^VERSION\s*=\s*"([^"]+)"', open(p, encoding="utf-8", errors="ignore").read(200000), re.M); return m.group(1) if m else None
+            except Exception: return None
+        dl = os.path.join(os.path.expanduser("~"), "Downloads")
+        if online_path: best = (online_ver, online_path)
+        cands = sorted({os.path.abspath(p) for p in glob.glob(os.path.join(dl, "combo_manager*.py")) + glob.glob(os.path.join(BASE, "combo_manager*.py"))} - {os.path.abspath(me)}, key=os.path.getmtime, reverse=True)
+        cands = [(ver(p), p) for p in cands if ver(p)]
+        if not online_path: best = max(cands, default=None)
+        if not online_path and (not best or best[0] <= VERSION):
+            if not messagebox.askyesno("Update Program", f"No newer file found in your Downloads folder.\nThis program: {VERSION}\n\nDo you want to choose the downloaded file yourself?"): return
+            p = filedialog.askopenfilename(title="Choose the new combo_manager.py", filetypes=[("Python file", "*.py")])
+            if not p: return
+            v = ver(p)
+            if not v: messagebox.showerror("Update", "This file is not a Combo Manager program file."); return
+            best = (v, p)
+        v, p = best
+        if v <= VERSION and not messagebox.askyesno("Update Program", f"That file (version {v}) is not newer than this program ({VERSION}).\n\nInstall it anyway?"): return
+        if v > VERSION and not messagebox.askyesno("Update Program", f"New version found:\n{p}\n\nInstalled: {VERSION}\nNew: {v}\n\nInstall it now? The program will restart. Your data is not changed and the old program is saved in 'old_versions'."): return
+        try:
+            py_compile.compile(p, cfile=os.path.join(tempfile.gettempdir(), "cm_check.pyc"), doraise=True)
+            od = os.path.join(BASE, "old_versions"); os.makedirs(od, exist_ok=True); shutil.copy2(me, os.path.join(od, f"combo_manager_{VERSION}.py")); shutil.copy2(p, me)
+        except Exception as e: messagebox.showerror("Update failed", f"Nothing was changed.\n{e}"); return
+        try:
+            if (os.path.dirname(p) == dl or online_path) and os.path.abspath(p) != os.path.abspath(me): os.remove(p)      # tidy the Downloads folder / temp file
+        except Exception: pass
+        relaunch(["--company=" + CO["key"]]); on_close()
+    UPD_FILE = os.path.join(BASE, "update_url.txt")
+    def fetch_remote(url, token=""):
+        import urllib.request
+        rq = urllib.request.Request(url, headers={"User-Agent": "ComboManager", **({"Authorization": "token " + token} if token else {})})
+        with urllib.request.urlopen(rq, timeout=15) as r: return r.read().decode("utf-8")
+    def remote_info():
+        """(url, token) saved in update_url.txt (line 1 = link of combo_manager.py on GitHub 'Raw', line 2 = optional access token for a private repository)."""
+        try: ls = [x.strip() for x in open(UPD_FILE, encoding="utf-8").read().splitlines() if x.strip()]
+        except OSError: ls = []
+        return (ls[0], ls[1] if len(ls) > 1 else "") if ls else (None, "")
+    def online_check(silent=False):
+        url, tok = remote_info()
+        if not url:
+            if silent: return None
+            r = ask_dialog(root, "Update link (one time)", [("GitHub Raw link of combo_manager.py", ""), ("Access token (private repo only, else blank)", "")])
+            if not r or not r[0]: return None
+            url, tok = r[0].strip(), r[1]
+            m_ = re.match(r"^https?://github\.com/([^/]+)/([^/]+)/blob/(.+)$", url)            # a normal GitHub page link -> make it the Raw link
+            if m_: url = f"https://raw.githubusercontent.com/{m_.group(1)}/{m_.group(2)}/{m_.group(3)}"
+            if re.match(r"^https?://github\.com/[^/]+/[^/]+/?$", url):
+                messagebox.showerror("Update", "That is the repository page link, not the file.\nOpen combo_manager.py on GitHub, click the 'Raw' button, and copy the address of that page."); return None
+        try: txt = fetch_remote(url, tok)
+        except Exception as e:
+            if not silent: messagebox.showerror("Update", f"Could not reach the update link.\nCheck the internet and the link in update_url.txt.\n\n{e}")
+            return None
+        m = re.search(r'^VERSION\s*=\s*"([^"]+)"', txt, re.M)
+        if not m or "def choose_company" not in txt:
+            if not silent:
+                why = "the file on GitHub is an OLD version without a version number - upload the newest combo_manager.py there" if "def choose_company" in txt else "the link does not open the program file (it must be the GitHub 'Raw' link)"
+                messagebox.showerror("Update", f"Cannot use this link: {why}.\n\nWhat the link returned starts with:\n{txt[:80]!r}\n\nLink: {url}")
+            return None
+        try: open(UPD_FILE, "w", encoding="utf-8").write(url + ("\n" + tok if tok else "") + "\n")      # remember the link only after it worked
+        except OSError: pass
+        return m.group(1), txt
+    def update_online():
+        got = online_check()
+        if not got: return
+        v, txt = got
+        if v <= VERSION: messagebox.showinfo("Update", f"You already have the latest version ({VERSION})."); return
+        tp = os.path.join(tempfile.gettempdir(), "combo_manager_new.py"); open(tp, "w", encoding="utf-8", newline="\n").write(txt)
+        update_program(tp, v)
+    def startup_update_check():
+        import threading
+        def work():
+            got = online_check(True)
+            if got and got[0] > VERSION: root.after(0, lambda: messagebox.showinfo("New version available", f"A new version ({got[0]}) of the program is ready.\nYou have {VERSION}.\n\nUpdate: Gateway > Utilities > Update Program (online)."))
+        threading.Thread(target=work, daemon=True).start()
     def change_company():
         relaunch(["--choose"]); on_close()
     ON_CHANGE_COMPANY[0] = change_company
@@ -2237,7 +2316,8 @@ if __name__ == "__main__":
                                           ("Credit Notes", "", L("Sales Returns")), ("Debit Notes", "", L("Purchase Returns")), ("Combo Making", "", L("Combo Making")), ("Pcs Conversion", "", L("Pcs Conversion")), ("Contra", "", L("Contra")), ("Journal", "", L("Journal")), ("Delivery Challans", "", L("Delivery Challans"))]),
       "reports": ("Reports & Stock", [("Sales, Purchase & Profit", "", L("Reports")), ("Stock Summary", "", L("Stock")), ("Shade / Design wise Stock", "", L("Shade Stock")), ("Combo Stock & Orders to Make", "", L("Combo Stock")), ("Account Statement (Ledger)", "", L("Ledger")),
                                       ("Outstanding (Balances)", "", L("Balances")), ("Bills Outstanding (bill-wise)", "", L("Bills Outstanding")), ("Cash / Bank Balance", "", L("Cash/Bank Balance")), ("LR / E-Way Bill Pending", "", L("LR Update")), ("Combo Consumption Estimate", "", L("Combo Master")), ("Job Work Register", "", L("Job Register")), ("Contractor Summary", "", L("Contractor Summary"))]),
-      "utils": ("Utilities", [("Select / Change Company", "F3", change_company), ("Change Working Date", "F2", change_date), ("Change Financial Year", "Ctrl+F2", change_fy), ("Change Period", "Alt+F2", change_period), ("Backup Now", "", do_backup), ("Check Data for Problems", "", show_data_check), ("Page Setup (Bill Size / Margins)", "", lambda: PageSetup(root, test_print)), ("Go To any screen", "Alt+G", go_to), ("Shortcut Keys", "F1", show_help)])}
+      "utils": ("Utilities", [("Select / Change Company", "F3", change_company), ("Change Working Date", "F2", change_date), ("Change Financial Year", "Ctrl+F2", change_fy), ("Change Period", "Alt+F2", change_period), ("Backup Now", "", do_backup), ("Update Program (online - GitHub)", "", update_online), ("Update Program (from downloaded file)", "", update_program), ("Check Data for Problems", "", show_data_check), ("Page Setup (Bill Size / Margins)", "", lambda: PageSetup(root, test_print)), ("Go To any screen", "Alt+G", go_to), ("Shortcut Keys", "F1", show_help)])}
     for nm_, (ttl, its) in list(MENUS.items()): MENUS[nm_] = (ttl, [it for it in its if not (callable(it[2]) and getattr(it[2], "page", None) and not page_on(it[2].page))])
+    root.after(1500, startup_update_check)
     gw = Gateway(nb, MENUS, goto); nb.insert(0, gw, text="Gateway"); nb.select(gw); gw.refresh()
     root.mainloop()
